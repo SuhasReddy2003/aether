@@ -1,0 +1,2 @@
+[console_scripts]
+aether = aether.cli.main:app

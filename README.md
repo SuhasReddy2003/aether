@@ -1,0 +1,200 @@
+# Aether
+
+**Git for Autonomous AI Actions.**
+Record. Replay. Fork. Diff. Undo.
+
+> **Status: Phase 1 of 6 — Flight Recorder.** This README describes what
+> exists today, honestly. Provenance, taint tracking, replay/fork, the
+> policy/risk engine, benchmarks, and the web UI are future phases and are
+> **not implemented yet**. See [`docs/PROGRESS.md`](docs/PROGRESS.md).
+
+## 1. What is Aether?
+
+Agents now change real state: databases, files, payments, email, other
+agents. Aether sits between an agent and its tools. Phase 1 gives you the
+foundation everything else builds on: a **tamper-evident, signed flight
+log** of every tool call an agent makes.
+
+## 2. Why it exists
+
+When an agent does something wrong, you need to know *what happened* and
+you need to be sure the record of what happened hasn't been quietly edited
+after the fact. That's what Phase 1 does — nothing more, nothing less.
+
+## 3. What's actually implemented (Phase 1)
+
+- **Interceptor** — `@aether.tool(...)` wraps any Python function (sync or
+  async). Every call is timed, executed, and recorded. Exceptions are
+  recorded and re-raised, never swallowed.
+- **Signed, hash-chained recording** — every event's hash covers the
+  previous event's hash plus its own canonical-JSON content
+  (`hash_i = SHA256(hash_{i-1} || canonical_json(event_i))`). The chain
+  head is signed with a locally-generated Ed25519 key.
+- **Tamper detection** — `aether verify <run_id>` recomputes the chain and
+  reports `VALID` or `INVALID`, and on `INVALID` **names the exact first
+  event that fails**. This is tested against real byte-level tampering of
+  the live SQLite database, not simulated.
+- **SQLite storage** (WAL mode) behind a `Storage` interface, so the backend
+  is replaceable.
+- **Cassette export/import** (`.aether` files) — portable, schema-versioned,
+  and hardened against malformed JSON, oversized files, too many events,
+  tampered chains, and forged signatures on import.
+- **Redaction** — configurable field redaction (passwords, API keys, card
+  numbers) applied **before** hashing, so redacted values never enter the
+  chain at all (and therefore cannot be recovered later, including by
+  Aether itself).
+- **CLI** (Typer + Rich): `run`, `inspect`, `events`, `verify`, `tools`,
+  `export`, `import`, `demo`, `doctor`.
+- **Scripted demo agent** (`examples/support_agent.py`) — a deterministic,
+  fully offline simulation of a support agent that reads a customer record,
+  reads an email, updates a CRM, and creates a payment. Nothing here
+  contacts a real database, inbox, or payment processor.
+
+## 4. Quick start
+
+```bash
+git clone <this-repo>
+cd aether
+pip install -e .
+
+python examples/support_agent.py
+# Run complete: run_xxxxxxxxxxxx
+# aether inspect run_xxxxxxxxxxxx
+# aether verify run_xxxxxxxxxxxx
+
+aether inspect run_xxxxxxxxxxxx
+aether verify run_xxxxxxxxxxxx      # VALID
+
+aether doctor                        # environment + database health check
+```
+
+Or the one-command version:
+
+```bash
+aether demo
+```
+
+### Proving tamper detection to yourself
+
+```bash
+RUN_ID=$(python -c "
+from aether.storage.sqlite import SQLiteStorage
+from aether.recording.recorder import DEFAULT_DATA_DIR
+print(SQLiteStorage(DEFAULT_DATA_DIR/'aether.db').get_run_ids()[-1])")
+
+aether verify $RUN_ID    # VALID
+
+# Now flip one byte in the live database (this is what tests/test_hashchain_tamper.py
+# and tests/test_cli.py do automatically, in isolated tmp dirs):
+python -c "
+import sqlite3, json
+from aether.recording.recorder import DEFAULT_DATA_DIR
+db = str(DEFAULT_DATA_DIR / 'aether.db')
+conn = sqlite3.connect(db)
+row = conn.execute('SELECT event_id, event_json FROM events WHERE step=3').fetchone()
+data = json.loads(row[1])
+data['action']['arguments']['note'] = 'tampered'
+conn.execute('UPDATE events SET event_json=? WHERE event_id=?', (json.dumps(data), row[0]))
+conn.commit()
+"
+
+aether verify $RUN_ID    # INVALID, names the exact tampered event, exit code 1
+```
+
+## 5. Architecture (Phase 1 slice)
+
+```text
+Agent code
+   │  @aether.tool(...)
+   ▼
+Interceptor (runtime/interceptor.py)
+   │  captures args, result/exception, duration
+   ▼
+Recorder (recording/recorder.py)
+   │  redacts sensitive fields, builds an Event
+   ▼
+Hash chain (recording/hashchain.py)     Signing (recording/signing.py)
+   │  hash_i = SHA256(hash_{i-1} || canonical_json(event_i))
+   ▼
+SQLite storage (storage/sqlite.py, behind storage/base.py Storage interface)
+   │
+   ├──▶ CLI (cli/main.py): inspect / events / verify / tools / export / import / demo / doctor
+   └──▶ Cassette (recording/cassette.py): portable, schema-versioned .aether files
+```
+
+## 6. Flight recorder & tamper evidence
+
+See section 5. The key property, tested in `tests/test_hashchain_tamper.py`:
+mutating any single field of any single stored event — or deleting an
+event, reordering events, or splicing events from a different run —
+is detected by `verify_chain()`, which reports the exact first event
+where the chain breaks.
+
+## 7–13. Not yet implemented
+
+Undo/shadow world, provenance/taint tracking, replay/fork/diff, the
+policy/risk/intent engines, regression testing & CI action, integrations
+(MCP/LangGraph/OpenTelemetry), and benchmarks are **Phases 2–5** and do not
+exist in this codebase yet. The web UI (Aether Studio) is **Phase 6**.
+
+## 14. Architecture decisions and tradeoffs
+
+- **SQLite over Postgres**: this phase has one writer per run in practice;
+  WAL mode plus explicit `BEGIN IMMEDIATE`/`COMMIT` transactions is enough
+  to keep concurrent writers from corrupting the chain (tested in
+  `tests/test_concurrency.py`), and it keeps the whole project runnable
+  with zero infrastructure.
+- **Event order is `seq` (DB-assigned autoincrement), not caller-supplied
+  `step`.** This was a real bug found while testing: if two writers on the
+  same run interleave, their `step` values can land out of true append
+  order, and sorting by `step` would make an untampered chain look broken.
+  `seq` is the source of truth for hash-chain order; `step` is just a
+  human-readable label.
+- **Redaction happens before hashing.** This means a redacted field is
+  redacted permanently — there is no "verify now, unredact for audit
+  later" path. That's a real limitation, documented here rather than
+  hidden.
+- **Local Ed25519 key, not a KMS.** The signature proves "whoever holds
+  this local key attested to this chain head," not more. Protecting the
+  key file is the operator's responsibility (see `docs/limitations.md`).
+
+## 15. Limitations (honest, Phase 1 scope)
+
+```text
+The signing key is a local file; Aether does not provide key management.
+Redaction is irreversible: a redacted field cannot be recovered from the
+  chain, by anyone, including a legitimate auditor.
+Tampering with the tail of the chain (deleting the most recent events and
+  nothing after them, or replacing both an event and the signature at once
+  with a self-consistent forgery) is only caught if the true head hash is
+  known from an independent source (e.g. a previously exported cassette or
+  an externally-stored signature) — verify_chain() alone verifies internal
+  consistency, not "nothing was ever removed from the end."
+No provenance, taint tracking, undo, replay, fork, policy engine, risk
+  engine, or benchmarks exist yet — see docs/scope.md and
+  docs/PROGRESS.md for what is planned vs. built.
+```
+
+## 16. Future work
+
+Phases 2–6 as specified: shadow world + undo + MCP proxy; provenance +
+taint + replay + fork; security + regression + CI; benchmarks + SDK + API;
+Aether Studio (web UI) + deployment.
+
+## Engineering rules followed in this phase
+
+- No `pass`/`TODO`/`NotImplementedError` for anything claimed as working.
+- Every number in this README (test count, coverage %) was generated by the
+  commands in `docs/PROGRESS.md`, not hand-typed.
+- Structured errors (`AetherError` and subclasses) — no bare exceptions,
+  no swallowed exceptions.
+- `ruff` and `mypy` both run clean (see CHANGELOG for what was fixed).
+
+## Running the tests yourself
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ --cov=aether --cov-report=term-missing
+ruff check aether/ examples/
+mypy aether/
+```
