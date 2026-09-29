@@ -4,9 +4,9 @@ import asyncio
 import threading
 from pathlib import Path
 
+from aether.core.action import Action, Authorization
 from aether.recording.hashchain import verify_chain
 from aether.recording.recorder import Recorder
-from aether.core.action import Action, Authorization
 
 
 def _action(run_id: str, step: int) -> Action:

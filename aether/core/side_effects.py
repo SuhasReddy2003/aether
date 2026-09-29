@@ -35,7 +35,7 @@ class SideEffect(BaseModel):
     amount: float | None = None
     resource: str | None = None
 
-    def model_post_init(self, __context: object) -> None:
+    def model_post_init(self, __context: object, /) -> None:
         # Never allow a declared compensation without reversible=True, and
         # never allow reversible=True on an IRREVERSIBLE-typed effect: that
         # combination is exactly the kind of dishonest reversibility claim

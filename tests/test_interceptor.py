@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 
 import pytest
 
@@ -54,9 +55,8 @@ def test_exception_is_recorded_and_reraised(aether_instance: Aether) -> None:
     def boom() -> None:
         raise ValueError("kaboom")
 
-    with pytest.raises(ValueError, match="kaboom"):
-        with a.run(agent="tester", goal="test exception") as handle:
-            boom()
+    with pytest.raises(ValueError, match="kaboom"), a.run(agent="tester", goal="test exception") as handle:
+        boom()
 
     events = a.recorder.storage.get_events(handle.run_id)
     assert len(events) == 1
@@ -78,7 +78,7 @@ def test_multiple_steps_increment_and_chain(aether_instance: Aether) -> None:
     events = a.recorder.storage.get_events(handle.run_id)
     assert [e.action.step for e in events] == [1, 2, 3, 4, 5]
     # each event's previous_hash must equal the prior event's hash
-    for prev, cur in zip(events, events[1:]):
+    for prev, cur in itertools.pairwise(events):
         assert cur.previous_hash == prev.hash
 
 
@@ -106,3 +106,31 @@ def test_redaction_applied_before_storage(aether_instance: Aether) -> None:
     events = a.recorder.storage.get_events(handle.run_id)
     assert events[0].action.arguments["password"] == "[REDACTED]"
     assert events[0].action.result["password"] == "[REDACTED]"
+
+
+def test_untrusted_output_flag_is_actually_persisted(aether_instance: Aether) -> None:
+    # Regression test for a real bug found during Phase 3 development: the
+    # `untrusted_source=True` flag was previously stashed into
+    # `event.action.__dict__` AFTER recording, meaning it was never part of
+    # the hash-chained Action and vanished on any reload from storage. It
+    # must now be a genuine, persisted field.
+    a = aether_instance
+
+    @a.tool(name="test.read_email", side_effects=[SideEffectType.READ], untrusted_source=True)
+    def read_email() -> dict:
+        return {"body": "hello"}
+
+    @a.tool(name="test.trusted_tool", side_effects=[SideEffectType.READ])
+    def trusted_tool() -> dict:
+        return {"ok": True}
+
+    with a.run(agent="tester", goal="untrusted flag test") as handle:
+        read_email()
+        trusted_tool()
+
+    # reload fresh from storage, not the in-memory objects, to prove it's
+    # really persisted (not just an in-memory attribute of this call)
+    fresh_storage = a.recorder.storage.__class__(a.recorder.storage.db_path)
+    events = fresh_storage.get_events(handle.run_id)
+    assert events[0].action.untrusted_output is True
+    assert events[1].action.untrusted_output is False

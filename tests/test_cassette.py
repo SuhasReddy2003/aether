@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from aether.core.errors import AetherCassetteError, AetherIntegrityError
 from aether.core.action import Action, Authorization
+from aether.core.errors import AetherCassetteError, AetherIntegrityError
 from aether.recording.cassette import export_cassette, import_cassette, load_cassette
 from aether.recording.recorder import Recorder
 from aether.storage.sqlite import SQLiteStorage

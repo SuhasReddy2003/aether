@@ -72,10 +72,27 @@ def _validate_shape(data: Any) -> dict[str, Any]:
     return data
 
 
-def load_cassette(path: str | Path, verify: bool = True) -> tuple[dict[str, Any], list[Event]]:
+def load_cassette(
+    path: str | Path,
+    verify: bool = True,
+    require_signature: bool = True,
+    trusted_public_keys: set[str] | None = None,
+) -> tuple[dict[str, Any], list[Event]]:
     """Load and validate a cassette file. Raises AetherCassetteError for
     malformed/oversized/unsafe input, AetherIntegrityError if verify=True
     and the chain or signature does not check out.
+
+    IMPORTANT — what verification does and does not prove (found by the
+    Phase 3 self-audit, see docs/self-audit-phase3.md):
+      * The hash chain proves internal consistency only.
+      * A signature proves the holder of the embedded public key attested to
+        this chain head. Because the public key travels INSIDE the cassette,
+        an attacker can rewrite history, recompute the chain, and re-sign
+        with their own key, and that still verifies. Authenticity therefore
+        requires a trust anchor: pass `trusted_public_keys` to pin the
+        signers you accept. Without it, only integrity is established.
+      * `require_signature=True` (default) rejects cassettes with no
+        signature at all; stripping the signature must not be a bypass.
     """
     path = Path(path)
     size = path.stat().st_size
@@ -107,17 +124,42 @@ def load_cassette(path: str | Path, verify: bool = True) -> tuple[dict[str, Any]
                 f"cassette hash chain is invalid (first bad event: {bad_id})", first_bad_event_id=bad_id
             )
         sig = data.get("signature")
-        if sig and events:
+        if not sig:
+            if require_signature:
+                raise AetherIntegrityError("cassette is unsigned; refusing to treat a bare hash chain as verified")
+        elif events:
+            if not isinstance(sig, dict) or not {"public_key_b64", "signature_b64"} <= sig.keys():
+                raise AetherIntegrityError("cassette signature block is malformed")
             head = events[-1]
             ok = verify_signature(sig["public_key_b64"], head.hash.encode("utf-8"), sig["signature_b64"])
             if not ok:
                 raise AetherIntegrityError("cassette signature does not verify against chain head")
+            if trusted_public_keys is not None and sig["public_key_b64"] not in trusted_public_keys:
+                raise AetherIntegrityError(
+                    "cassette is validly signed, but by a key that is not in the trusted set "
+                    f"(signer fingerprint {key_fingerprint(sig['public_key_b64'])})"
+                )
 
     return data, events
 
 
-def import_cassette(storage: Storage, path: str | Path, verify: bool = True) -> str:
-    data, events = load_cassette(path, verify=verify)
+def key_fingerprint(public_key_b64: str) -> str:
+    """Short, stable SHA-256 fingerprint of a public key, for display and pinning."""
+    import hashlib
+
+    return hashlib.sha256(public_key_b64.encode("utf-8")).hexdigest()[:16]
+
+
+def import_cassette(
+    storage: Storage,
+    path: str | Path,
+    verify: bool = True,
+    require_signature: bool = True,
+    trusted_public_keys: set[str] | None = None,
+) -> str:
+    data, events = load_cassette(
+        path, verify=verify, require_signature=require_signature, trusted_public_keys=trusted_public_keys
+    )
     run_id = data["run_id"]
     storage.create_run(run_id, data.get("agent_id") or "unknown", data.get("agent_version") or "v1", data.get("goal") or "")
     existing_ids = {e.event_id for e in storage.get_events(run_id)}

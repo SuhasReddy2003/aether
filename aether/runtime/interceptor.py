@@ -12,9 +12,10 @@ import inspect
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Self, TypeVar
 
 from aether.core.action import Action, ActionStatus, Authorization, new_id
+from aether.core.errors import AetherRunConflictError
 from aether.core.event import Event
 from aether.core.side_effects import SideEffect, SideEffectType
 from aether.recording.recorder import Recorder
@@ -29,12 +30,12 @@ _current_run: contextvars.ContextVar[RunContext | None] = contextvars.ContextVar
 
 
 class RunContext:
-    def __init__(self, run_id: str, agent_id: str, agent_version: str, role: str) -> None:
+    def __init__(self, run_id: str, agent_id: str, agent_version: str, role: str, starting_step: int = 0) -> None:
         self.run_id = run_id
         self.agent_id = agent_id
         self.agent_version = agent_version
         self.role = role
-        self.step = 0
+        self.step = starting_step
         self.last_event_id: str | None = None
 
     def next_step(self) -> int:
@@ -45,15 +46,45 @@ class RunContext:
 class RunHandle:
     """Context manager returned by `aether.run(...)`."""
 
-    def __init__(self, aether: Aether, run_id: str, agent_id: str, agent_version: str, goal: str, role: str) -> None:
+    def __init__(
+        self,
+        aether: Aether,
+        run_id: str,
+        agent_id: str,
+        agent_version: str,
+        goal: str,
+        role: str,
+        starting_step: int = 0,
+        starting_last_event_id: str | None = None,
+    ) -> None:
         self._aether = aether
         self.run_id = run_id
-        self._ctx = RunContext(run_id, agent_id, agent_version, role)
+        self._ctx = RunContext(run_id, agent_id, agent_version, role, starting_step=starting_step)
+        self._ctx.last_event_id = starting_last_event_id
         self._token: contextvars.Token | None = None
         self._goal = goal
 
-    def __enter__(self) -> RunHandle:
+    def __enter__(self) -> Self:
         self._aether.recorder.start_run(self.run_id, self._ctx.agent_id, self._ctx.agent_version, self._goal)
+        existing_events = self._aether.recorder.storage.get_events(self.run_id)
+        # A run_id with pre-existing events is only ever legitimate when
+        # the caller is deliberately resuming from a known point (e.g.
+        # `fork_run`, which copies a verbatim prefix first and then
+        # resumes with `starting_step` set to exactly that prefix's
+        # length). Any other case — most commonly, a fixed run_id
+        # accidentally reused across two separate script invocations —
+        # would otherwise silently restart step numbering at 1 while
+        # appending to the SAME run_id, corrupting the recorded history
+        # with duplicate, colliding step numbers. Found for real while
+        # testing Phase 3's fork_demo.py against a persistent data dir.
+        if existing_events and self._ctx.step != len(existing_events):
+            raise AetherRunConflictError(
+                f"run_id '{self.run_id}' already has {len(existing_events)} recorded event(s), "
+                f"but this run was started expecting to begin at step {self._ctx.step}. "
+                "Reusing a run_id for a fresh run silently corrupts step ordering — use a "
+                "new run_id, or pass a starting_step that matches the existing history exactly "
+                "(as fork_run does)."
+            )
         self._token = _current_run.set(self._ctx)
         return self
 
@@ -61,7 +92,7 @@ class RunHandle:
         if self._token is not None:
             _current_run.reset(self._token)
 
-    async def __aenter__(self) -> RunHandle:
+    async def __aenter__(self) -> Self:
         return self.__enter__()
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -91,8 +122,18 @@ class Aether:
         agent_version: str = "v1",
         role: str = "agent",
         run_id: str | None = None,
+        starting_step: int = 0,
+        starting_last_event_id: str | None = None,
     ) -> RunHandle:
-        return RunHandle(self, run_id or new_id("run"), agent, agent_version, goal, role)
+        """Start (or resume) a run. `starting_step`/`starting_last_event_id`
+        let a caller resume an existing run's hash chain and step counter
+        exactly where it left off — used by `aether.replay.fork` to append
+        a live continuation after a verbatim-replayed prefix, rather than
+        restarting step numbering from zero."""
+        return RunHandle(
+            self, run_id or new_id("run"), agent, agent_version, goal, role,
+            starting_step=starting_step, starting_last_event_id=starting_last_event_id,
+        )
 
     def tool(
         self,
@@ -241,10 +282,10 @@ class Aether:
             side_effects=side_effects,
             duration_ms=duration_ms,
             parent_action_id=ctx.last_event_id,
+            untrusted_output=untrusted,
         )
         event = self.recorder.record(action, parent_event_id=ctx.last_event_id)
         ctx.last_event_id = event.event_id
-        event.action.__dict__["_untrusted_source"] = untrusted  # informational only in Phase 1
         return event
 
 

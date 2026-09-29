@@ -41,3 +41,11 @@ class AetherSimulationError(AetherError):
 
 class AetherCassetteError(AetherError):
     """Raised on malformed, oversized, or unsafe cassette import."""
+
+
+class AetherRunConflictError(AetherError):
+    """Raised when a run_id is reused in a way that would corrupt step
+    ordering — see RunHandle.__enter__ for the exact condition. A
+    deliberate resume (fork_run's verbatim-prefix pattern) sets
+    `starting_step` to match existing history exactly and is not affected.
+    """

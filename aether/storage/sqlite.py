@@ -180,3 +180,32 @@ class SQLiteStorage(Storage):
         against the database file, and by `aether doctor` for integrity
         checks."""
         return self._connect()
+
+    # -- state snapshots (checkpoints) ----------------------------------
+
+    def save_snapshot(self, run_id: str, step: int, label: str, data_json: str, content_hash: str) -> str:
+        from aether.core.action import new_id, utcnow
+
+        snapshot_id = new_id("snap")
+        conn = self._connect()
+        conn.execute(
+            "INSERT INTO state_snapshots (snapshot_id, run_id, step, label, content_hash, data_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (snapshot_id, run_id, step, label, content_hash, data_json, utcnow().isoformat()),
+        )
+        return snapshot_id
+
+    def get_snapshot_at_or_before(self, run_id: str, step: int) -> dict | None:
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM state_snapshots WHERE run_id=? AND step<=? ORDER BY step DESC LIMIT 1",
+            (run_id, step),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_snapshots(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT * FROM state_snapshots WHERE run_id=? ORDER BY step ASC", (run_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]

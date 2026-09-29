@@ -56,6 +56,12 @@ class Action(BaseModel):
     timestamp: datetime = Field(default_factory=utcnow)
     duration_ms: float = 0.0
     parent_action_id: str | None = None
+    untrusted_output: bool = Field(
+        default=False,
+        description="True if this action's result is untrusted content (e.g. reading an "
+        "email or web page) for taint-tracking purposes. Persisted as a real field so it "
+        "is part of the recorded, hash-chained event, not an ephemeral in-memory flag.",
+    )
 
     def to_record(self) -> dict[str, Any]:
         """JSON-safe dict for hashing/storage (datetimes -> ISO strings)."""

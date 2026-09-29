@@ -3,9 +3,13 @@ plus our explicit BEGIN IMMEDIATE / COMMIT transaction boundaries must mean
 the log is verifiable up to the last *complete* event, with no partial or
 corrupt row for the interrupted one.
 
-This is tested against a real subprocess that is SIGKILLed mid-run, not
+This is tested against a real subprocess that is hard-killed mid-run, not
 simulated in-process, since in-process mocking cannot reproduce what
 actually happens to the OS file/WAL on a hard kill.
+
+Uses `Popen.kill()` rather than `send_signal(signal.SIGKILL)` because
+SIGKILL does not exist on Windows — `Popen.kill()` maps to SIGKILL on
+POSIX and to `TerminateProcess` on Windows, so this test is cross-platform.
 """
 from __future__ import annotations
 
@@ -46,7 +50,7 @@ def test_kill_mid_run_leaves_verifiable_prefix(tmp_path: Path) -> None:
 
     proc = subprocess.Popen([sys.executable, str(script_path)])
     time.sleep(0.3)  # let it write several events
-    proc.kill()
+    proc.kill()  # SIGKILL on POSIX, TerminateProcess on Windows
     proc.wait(timeout=5)
 
     storage = SQLiteStorage(data_dir / "aether.db")

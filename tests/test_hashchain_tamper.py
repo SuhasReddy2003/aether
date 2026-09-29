@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 
+from aether.core.action import Action, Authorization
 from aether.recording.hashchain import verify_chain
 from aether.recording.recorder import Recorder
 from aether.storage.sqlite import SQLiteStorage
-from aether.core.action import Action, Authorization
 
 
 def _make_action(run_id: str, step: int, tool: str = "test.tool") -> Action:
@@ -79,7 +79,7 @@ def test_reordering_events_breaks_the_chain(storage: SQLiteStorage, recorder: Re
 
     events = storage.get_events(run_id)
     swapped = [events[0], events[2], events[1], events[3]]
-    valid, bad_id = verify_chain(swapped)
+    valid, _bad_id = verify_chain(swapped)
     assert not valid
 
 
@@ -111,7 +111,7 @@ def test_swapping_events_between_two_runs_breaks_chain(storage: SQLiteStorage, r
     events_a = storage.get_events(run_a)
     events_b = storage.get_events(run_b)
     mixed = [events_a[0], events_b[1], events_a[2]]
-    valid, bad_id = verify_chain(mixed)
+    valid, _bad_id = verify_chain(mixed)
     assert not valid
 
 
